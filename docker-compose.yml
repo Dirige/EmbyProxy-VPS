@@ -1,0 +1,24 @@
+# ============================================================
+# Emby 反代管理面板 - Docker Compose
+# 用法：
+#   1. 修改 ADMIN_TOKEN（建议改成你自己的强密钥）
+#   2. docker compose up -d --build
+#   3. 浏览器打开 http://你的IP:3333/ ，用 ADMIN_TOKEN 登录
+# ============================================================
+services:
+  emby-proxy:
+    build: .
+    container_name: emby-proxy
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    environment:
+      # 管理员密钥（首次启动生效；已有 config.json 时不会覆盖）
+      - ADMIN_TOKEN=your_strong_admin_token_here
+      # 面板端口（如需改端口，上面 ports 也要对应改）
+      - PORT=3333
+      # 时区
+      - TZ=Asia/Shanghai
+    volumes:
+      # 持久化：配置 / 节点 / 统计数据
+      - ./data:/app/data

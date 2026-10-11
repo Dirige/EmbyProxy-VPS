@@ -1,0 +1,8 @@
+data/
+*.md
+install.sh
+test-upstream.js
+.git
+.gitignore
+.trae-html-share-packages/
+*.zip
