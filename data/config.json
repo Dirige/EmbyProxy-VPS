@@ -1,0 +1,8 @@
+{
+  "adminToken": "changeme_please",
+  "adminPass": null,
+  "subscribers": [],
+  "frontendDomain": "",
+  "backendDomain": "",
+  "networkPreference": "auto"
+}

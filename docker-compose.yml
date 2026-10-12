@@ -1,9 +1,12 @@
 # ============================================================
 # Emby 反代管理面板 - Docker Compose
-# 用法：
-#   1. 修改 ADMIN_TOKEN（建议改成你自己的强密钥）
-#   2. docker compose up -d --build
-#   3. 浏览器打开 http://你的IP:3333/ ，用 ADMIN_TOKEN 登录
+#
+# 【本地无外网环境】注意事项：
+#   1. 拉取 node:alpine 基础镜像需要外网 → 给 Docker 配置代理
+#      （Docker Desktop → Settings → Resources → Proxies）
+#      或在有网机器 docker save 导出后 docker load 导入
+#   2. 容器内访问宿主机代理用 host.docker.internal（Windows/Mac）
+#      或用 --network host 模式（Linux）直连宿主机网络
 # ============================================================
 services:
   emby-proxy:
@@ -19,6 +22,15 @@ services:
       - PORT=3333
       # 时区
       - TZ=Asia/Shanghai
+      # ============ 代理配置（反代外网 Emby 源站时才需要） ============
+      # 取消下面注释并改成你的代理地址（容器内访问宿主机代理用 host.docker.internal）
+      # - HTTPS_PROXY=http://host.docker.internal:7890
+      # - HTTP_PROXY=http://host.docker.internal:7890
+      # - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+      # - NODE_USE_ENV_PROXY=1
+      # ============================================================
     volumes:
       # 持久化：配置 / 节点 / 统计数据
       - ./data:/app/data
+    # Linux 用户如需容器直连宿主机网络访问代理，可改用下面这行（同时删掉上面的 ports）：
+    # network_mode: host
