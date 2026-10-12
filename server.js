@@ -22,6 +22,204 @@ const STATS_FILE = path.join(DATA_DIR, 'stats.json');
 const PANEL_FILE = path.join(__dirname, 'panel.html');
 
 /* ==========================================================
+ * 代理支持（HTTP / SOCKS5），零依赖原生实现
+ * 环境变量：
+ *   HTTP_PROXY / HTTPS_PROXY    → HTTP 代理  （如 http://10.0.0.5:7890）
+ *   SOCKS_PROXY / SOCKS5_PROXY  → SOCKS5 代理（如 socks5://10.0.0.5:1080）
+ *   NO_PROXY                    → 不走代理的域名/网段（逗号分隔）
+ * 优先级：SOCKS5 > HTTP；HTTPS_PROXY > HTTP_PROXY
+ * ========================================================== */
+function parseProxyEnv() {
+  const socks = process.env.SOCKS5_PROXY || process.env.SOCKS_PROXY || process.env.socks5_proxy || process.env.socks_proxy;
+  const httpEnv = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+  const raw = socks || httpEnv;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    let type;
+    if (u.protocol === 'socks5:' || u.protocol === 'socks:') type = 'socks5';
+    else if (u.protocol === 'http:' || u.protocol === 'https:') type = 'http';
+    else return null;
+    return {
+      type,
+      host: u.hostname,
+      port: parseInt(u.port || (type === 'socks5' ? '1080' : '8080')),
+      username: decodeURIComponent(u.username || ''),
+      password: decodeURIComponent(u.password || ''),
+    };
+  } catch (e) { return null; }
+}
+
+const PROXY = parseProxyEnv();
+if (PROXY) {
+  console.log(`[代理] 已启用 ${PROXY.type.toUpperCase()} 代理 → ${PROXY.host}:${PROXY.port}${PROXY.username ? '（带认证）' : ''}`);
+}
+
+function shouldBypassProxy(host) {
+  const noProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+  if (!noProxy) return false;
+  const hostLower = String(host).toLowerCase();
+  return noProxy.split(',').map(s => s.trim().toLowerCase()).some(pattern => {
+    if (!pattern) return false;
+    if (pattern === '*') return true;
+    if (pattern.startsWith('.')) return hostLower.endsWith(pattern);
+    if (pattern.includes('/')) {
+      try {
+        const [netStr, bitsStr] = pattern.split('/');
+        const netParts = netStr.split('.').map(Number);
+        const hostParts = hostLower.split('.').map(Number);
+        if (netParts.length !== 4 || hostParts.length !== 4) return false;
+        const mask = parseInt(bitsStr);
+        const netNum = (netParts[0] << 24 >>> 0) + (netParts[1] << 16) + (netParts[2] << 8) + netParts[3];
+        const hostNum = (hostParts[0] << 24 >>> 0) + (hostParts[1] << 16) + (hostParts[2] << 8) + hostParts[3];
+        const shift = 32 - mask;
+        return (netNum >>> shift) === (hostNum >>> shift);
+      } catch (e) { return false; }
+    }
+    return hostLower === pattern || hostLower.endsWith('.' + pattern);
+  });
+}
+
+function connectHttpProxy(proxy, host, port) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(proxy.port, proxy.host, () => {
+      const auth = proxy.username ? `${proxy.username}:${proxy.password}` : '';
+      const authHeader = auth ? `\r\nProxy-Authorization: Basic ${Buffer.from(auth).toString('base64')}` : '';
+      socket.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}${authHeader}\r\n\r\n`);
+    });
+    let buf = Buffer.alloc(0);
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const idx = buf.indexOf('\r\n\r\n');
+      if (idx === -1) return;
+      const head = buf.slice(0, idx).toString();
+      if (/^HTTP\/1\.[01] 200/i.test(head)) {
+        socket.removeListener('data', onData);
+        socket.removeAllListeners('error');
+        socket.setTimeout(0);
+        resolve(socket);
+      } else {
+        socket.destroy();
+        reject(new Error(`HTTP 代理 CONNECT 失败: ${head.split('\r\n')[0]}`));
+      }
+    };
+    socket.on('data', onData);
+    socket.once('error', reject);
+    socket.setTimeout(15000, () => { socket.destroy(); reject(new Error('HTTP 代理连接超时')); });
+  });
+}
+
+function connectSocks5(proxy, host, port) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(proxy.port, proxy.host);
+    let stage = 0;
+    let buf = Buffer.alloc(0);
+
+    socket.once('connect', () => {
+      const method = proxy.username ? 0x02 : 0x00;
+      socket.write(Buffer.from([0x05, 0x01, method]));
+      stage = 1;
+    });
+
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      try {
+        if (stage === 1) {
+          if (buf.length < 2) return;
+          if (buf[0] !== 0x05) throw new Error('SOCKS5 版本不匹配');
+          const m = buf[1];
+          if (m === 0xFF) throw new Error('SOCKS5 无可用认证方式');
+          buf = buf.slice(2);
+          if (m === 0x02 && proxy.username) {
+            const ub = Buffer.from(proxy.username, 'utf8');
+            const pb = Buffer.from(proxy.password, 'utf8');
+            socket.write(Buffer.concat([Buffer.from([0x01, ub.length]), ub, Buffer.from([pb.length]), pb]));
+            stage = 2;
+          } else {
+            sendConnect();
+          }
+        } else if (stage === 2) {
+          if (buf.length < 2) return;
+          if (buf[1] !== 0x00) throw new Error('SOCKS5 认证失败');
+          buf = buf.slice(2);
+          sendConnect();
+        } else if (stage === 3) {
+          if (buf.length < 4) return;
+          if (buf[1] !== 0x00) {
+            const errs = ['成功', '通用故障', '规则不允许', '网络不可达', '主机不可达', '连接被拒绝', 'TTL超时', '命令不支持', '地址类型不支持'];
+            throw new Error(`SOCKS5 连接失败: ${errs[buf[1]] || '未知'}`);
+          }
+          const atyp = buf[3];
+          let hdr;
+          if (atyp === 0x01) hdr = 4 + 4 + 2;
+          else if (atyp === 0x04) hdr = 4 + 16 + 2;
+          else if (atyp === 0x03) {
+            if (buf.length < 5) return;
+            hdr = 4 + 1 + buf[4] + 2;
+          } else throw new Error('SOCKS5 未知地址类型');
+          if (buf.length < hdr) return;
+          socket.removeAllListeners('data');
+          socket.removeAllListeners('error');
+          socket.setTimeout(0);
+          resolve(socket);
+        }
+      } catch (e) { socket.destroy(); reject(e); }
+    });
+
+    function sendConnect() {
+      const hb = Buffer.from(host, 'utf8');
+      socket.write(Buffer.concat([
+        Buffer.from([0x05, 0x01, 0x00, 0x03, hb.length]),
+        hb,
+        Buffer.from([port >> 8, port & 0xFF])
+      ]));
+      buf = Buffer.alloc(0);
+      stage = 3;
+    }
+
+    socket.once('error', reject);
+    socket.setTimeout(15000, () => { socket.destroy(); reject(new Error('SOCKS5 连接超时')); });
+  });
+}
+
+// 统一建立到目标的连接：代理隧道 or 直连；useTls 时在 socket 上做 TLS
+async function createUpstreamSocket(host, port, useTls) {
+  let raw;
+  if (PROXY && !shouldBypassProxy(host)) {
+    raw = PROXY.type === 'http'
+      ? await connectHttpProxy(PROXY, host, port)
+      : await connectSocks5(PROXY, host, port);
+  } else {
+    raw = await new Promise((resolve, reject) => {
+      const s = net.connect(port, host, () => resolve(s));
+      s.once('error', reject);
+      s.setTimeout(15000, () => { s.destroy(); reject(new Error('连接超时')); });
+    });
+  }
+  if (useTls) {
+    return new Promise((resolve, reject) => {
+      const ts = tls.connect({ socket: raw, servername: host, rejectUnauthorized: false }, () => resolve(ts));
+      ts.once('error', reject);
+    });
+  }
+  return raw;
+}
+
+// 自定义 Agent：让 http/https.request 走代理隧道
+class ProxyHttpAgent extends http.Agent {
+  createConnection(options, callback) {
+    createUpstreamSocket(options.host, options.port, false)
+      .then(s => callback(null, s)).catch(e => callback(e));
+  }
+}
+class ProxyHttpsAgent extends https.Agent {
+  createConnection(options, callback) {
+    createUpstreamSocket(options.host, options.port, true)
+      .then(s => callback(null, s)).catch(e => callback(e));
+  }
+}
+
+/* ==========================================================
  * 数据层（JSON 文件存储）
  * ========================================================== */
 function ensureData() {
@@ -226,42 +424,88 @@ async function buildUpstreamCandidates(target, remainingPath, search) {
 
 async function proxyOnce(targetUrlStr, req, mode, realIp, originHost) {
   const targetUrl = new URL(targetUrlStr);
-  const headers = new Headers();
+  const useTls = targetUrl.protocol === 'https:';
+  const port = parseInt(targetUrl.port || (useTls ? 443 : 80));
 
+  const headers = {};
+  const skipLower = ['host', 'cookie', 'connection', 'content-length', 'transfer-encoding',
+    'upgrade', 'http2-settings', 'proxy-connection', 'keep-alive'];
   for (const [k, v] of Object.entries(req.headers)) {
-    if (v === undefined) continue;
-    if (['host', 'cookie', 'connection', 'content-length', 'transfer-encoding',
-         'upgrade', 'http2-settings', 'proxy-connection', 'keep-alive'].includes(k)) continue;
-    if (Array.isArray(v)) v.forEach(x => headers.append(k, x));
-    else headers.set(k, String(v));
+    if (v === undefined || skipLower.includes(k.toLowerCase())) continue;
+    headers[k] = Array.isArray(v) ? v.join(', ') : String(v);
   }
 
   // 去掉面板自身 cookie
   const cookies = (req.headers.cookie || '').split(';').map(s => s.trim()).filter(Boolean)
     .filter(c => !c.toLowerCase().startsWith('admin_token='));
-  if (cookies.length) headers.set('Cookie', cookies.join('; '));
+  if (cookies.length) headers['Cookie'] = cookies.join('; ');
 
-  // Host 头保留原始域名（节点级 IPv6/IPv4 强制时连接地址被换成 IP，必须保留原域名）
-  headers.set('Host', originHost || targetUrl.host);
-  headers.set('X-Forwarded-Proto', targetUrl.protocol.replace(':', ''));
-  headers.set('X-Forwarded-Host', req.headers.host || '');
+  headers['Host'] = originHost || targetUrl.host;
+  headers['X-Forwarded-Proto'] = targetUrl.protocol.replace(':', '');
+  headers['X-Forwarded-Host'] = req.headers.host || '';
 
   if (mode === 'strict' || mode === 'dual') {
-    headers.set('Origin', targetUrl.origin);
-    headers.set('Referer', targetUrl.origin + '/');
+    headers['Origin'] = targetUrl.origin;
+    headers['Referer'] = targetUrl.origin + '/';
   }
   if (mode === 'dual' || mode === 'realip_only') {
-    headers.set('X-Real-IP', realIp);
-    headers.set('X-Forwarded-For', realIp);
+    headers['X-Real-IP'] = realIp;
+    headers['X-Forwarded-For'] = realIp;
   }
 
-  const init = { method: req.method, headers, redirect: 'manual' };
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    init.body = req.__bodyBuffer || undefined;
-    if (init.body) init.duplex = 'half';
+  const reqOpts = {
+    method: req.method,
+    host: targetUrl.hostname,
+    port,
+    path: targetUrl.pathname + targetUrl.search,
+    headers,
+    rejectUnauthorized: false,
+  };
+
+  // 代理处理
+  const bypass = PROXY && shouldBypassProxy(targetUrl.hostname);
+  if (PROXY && !bypass) {
+    if (PROXY.type === 'http' && !useTls) {
+      // HTTP 代理 + HTTP 目标：直接请求代理，path 用完整 URL
+      reqOpts.host = PROXY.host;
+      reqOpts.port = PROXY.port;
+      reqOpts.path = targetUrl.href;
+      if (PROXY.username) {
+        reqOpts.headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${PROXY.username}:${PROXY.password}`).toString('base64');
+      }
+    } else {
+      // HTTPS 目标 或 SOCKS5：用自定义 Agent 建隧道
+      reqOpts.agent = useTls ? new ProxyHttpsAgent() : new ProxyHttpAgent();
+    }
   }
 
-  return fetch(targetUrl, init);
+  const lib = useTls ? https : http;
+  return new Promise((resolve, reject) => {
+    const upReq = lib.request(reqOpts, (upRes) => {
+      // 包装成 fetch Response 风格的对象
+      resolve({
+        status: upRes.statusCode,
+        headers: {
+          get: (name) => {
+            const v = upRes.headers[String(name).toLowerCase()];
+            return Array.isArray(v) ? v.join(', ') : (v == null ? null : String(v));
+          },
+          entries: () => Object.entries(upRes.headers),
+        },
+        body: upRes,
+        async arrayBuffer() {
+          const chunks = [];
+          for await (const c of upRes) chunks.push(c);
+          return Buffer.concat(chunks);
+        },
+      });
+    });
+    upReq.on('error', reject);
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.__bodyBuffer) {
+      upReq.write(req.__bodyBuffer);
+    }
+    upReq.end();
+  });
 }
 
 /* 节点级 IPv6/IPv4 强制：
@@ -395,9 +639,10 @@ async function handleProxy(req, res, pathname, search) {
         const timer = setTimeout(() => controller.abort(), 30000);
         try {
           // 节点级 v6/v4 强制：预解析替换连接地址（Host 头保留原域名），失败自动回退原始地址
+          // 注意：使用代理时跳过本地预解析（域名由代理解析）
           let requestUrl = candidateUrl;
           let originHost = null;
-          if (ipv6Mode !== 'auto') {
+          if (ipv6Mode !== 'auto' && !PROXY) {
             const r = await resolveV4V6(candidateUrl, ipv6Mode);
             requestUrl = r.url;
             originHost = r.originHost;
@@ -723,11 +968,39 @@ async function handleApi(req, res, url) {
     if (!target) return sendJSON(res, 400, { success: false, error: '缺少 url' });
     const start = Date.now();
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      const r = await fetch(target, { method: 'HEAD', redirect: 'follow', signal: controller.signal, headers: { 'User-Agent': 'Mozilla/5.0 EmbyProxyPing' } });
-      clearTimeout(timer);
-      return sendJSON(res, 200, { success: true, latency: Date.now() - start, status: r.status });
+      const targetUrl = new URL(target);
+      const useTls = targetUrl.protocol === 'https:';
+      const port = parseInt(targetUrl.port || (useTls ? 443 : 80));
+      const pingHeaders = { 'User-Agent': 'Mozilla/5.0 EmbyProxyPing' };
+      const reqOpts = {
+        method: 'HEAD',
+        host: targetUrl.hostname,
+        port,
+        path: targetUrl.pathname + targetUrl.search,
+        headers: pingHeaders,
+        rejectUnauthorized: false,
+      };
+      if (PROXY && !shouldBypassProxy(targetUrl.hostname)) {
+        if (PROXY.type === 'http' && !useTls) {
+          reqOpts.host = PROXY.host;
+          reqOpts.port = PROXY.port;
+          reqOpts.path = targetUrl.href;
+          if (PROXY.username) {
+            reqOpts.headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${PROXY.username}:${PROXY.password}`).toString('base64');
+          }
+        } else {
+          reqOpts.agent = useTls ? new ProxyHttpsAgent() : new ProxyHttpAgent();
+        }
+      }
+      const lib = useTls ? https : http;
+      const pingReq = lib.request(reqOpts, (pingRes) => {
+        pingRes.resume();
+        return sendJSON(res, 200, { success: true, latency: Date.now() - start, status: pingRes.statusCode });
+      });
+      pingReq.on('error', (e) => sendJSON(res, 200, { success: false, error: e.message, latency: Date.now() - start }));
+      pingReq.setTimeout(10000, () => { pingReq.destroy(); });
+      pingReq.end();
+      return;
     } catch (e) {
       return sendJSON(res, 200, { success: false, error: e.message, latency: Date.now() - start });
     }
@@ -827,11 +1100,9 @@ server.on('upgrade', (req, socket, head) => {
     socket.pipe(upstreamSocket);
   };
 
-  if (useTls) {
-    const tlsSock = tls.connect({ host: targetUrl.hostname, port, rejectUnauthorized: false }, () => onConnect(tlsSock));
-  } else {
-    const netSock = net.connect(port, targetUrl.hostname, () => onConnect(netSock));
-  }
+  createUpstreamSocket(targetUrl.hostname, port, useTls)
+    .then(onConnect)
+    .catch(() => socket.destroy());
 });
 
 // 不指定 host：监听系统全部地址（IPv6 双栈，IPv4 自动映射），纯 IPv4 / 纯 IPv6 / 双栈机器均可访问

@@ -23,11 +23,22 @@ services:
       # 时区
       - TZ=Asia/Shanghai
       # ============ 代理配置（反代外网 Emby 源站时才需要） ============
-      # 取消下面注释并改成你的代理地址（容器内访问宿主机代理用 host.docker.internal）
+      # 取消注释并改成你的代理地址。
+      # 注意：server.js 原生支持 HTTP 和 SOCKS5 代理，无需 NODE_USE_ENV_PROXY。
+      # 容器内访问宿主机代理用 host.docker.internal（Windows/Mac）；
+      # Linux 建议用 network_mode: host（见文件底部）。
+      #
+      # HTTP 代理示例：
       # - HTTPS_PROXY=http://host.docker.internal:7890
       # - HTTP_PROXY=http://host.docker.internal:7890
+      #
+      # SOCKS5 代理示例：
+      # - SOCKS5_PROXY=socks5://host.docker.internal:1080
+      #
+      # 带认证：http://user:pass@host:port 或 socks5://user:pass@host:port
+      #
+      # 内网不走代理：
       # - NO_PROXY=localhost,127.0.0.1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
-      # - NODE_USE_ENV_PROXY=1
       # ============================================================
     volumes:
       # 持久化：配置 / 节点 / 统计数据

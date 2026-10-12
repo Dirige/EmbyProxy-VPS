@@ -9,16 +9,29 @@
 #   ./start-local.sh restart      # 重启后台进程
 #
 # 代理配置（反代外网 Emby 源站时需要）：
-#   编辑下方 PROXY 变量，或在运行前设置环境变量：
-#     export HTTPS_PROXY=http://127.0.0.1:7890
-#     export HTTP_PROXY=http://127.0.0.1:7890
-#   脚本会自动让 Node.js 的 fetch 走代理（Node 22.13+ 支持 NODE_USE_ENV_PROXY）
+#   方式一：编辑下方 PROXY 变量
+#   方式二：运行前设置环境变量
+#
+#   HTTP 代理示例：
+#     PROXY="http://10.0.0.5:7890"
+#
+#   SOCKS5 代理示例：
+#     PROXY="socks5://10.0.0.5:1080"
+#
+#   带认证的代理：
+#     PROXY="http://user:pass@10.0.0.5:7890"
+#     PROXY="socks5://user:pass@10.0.0.5:1080"
+#
+#   也支持环境变量（优先级：SOCKS5 > HTTP）：
+#     export SOCKS5_PROXY=socks5://10.0.0.5:1080
+#     export HTTP_PROXY=http://10.0.0.5:7890
+#     export HTTPS_PROXY=http://10.0.0.5:7890
 # ============================================================
 set -e
 
 # ============ 可改配置 ============
 PORT="${PORT:-3333}"                       # 面板端口
-# 代理地址（留空则不走代理；反代外网源站时填上你的本地代理，如 http://127.0.0.1:7890）
+# 代理地址（留空则不走代理；支持 http:// 和 socks5:// 两种协议）
 PROXY="${PROXY:-}"
 # 内网地址白名单（不走代理），多个用逗号分隔
 NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12}"
@@ -32,21 +45,31 @@ LOG_FILE="$SCRIPT_DIR/emby-proxy.log"
 
 # 检查 Node.js
 if ! command -v node >/dev/null 2>&1; then
-  echo "[错误] 未安装 Node.js，请先安装 Node.js 22+"
+  echo "[错误] 未安装 Node.js，请先安装 Node.js 18+"
   exit 1
 fi
 
 # 设置代理环境变量（如果配置了 PROXY）
 if [ -n "$PROXY" ]; then
-  export HTTP_PROXY="$PROXY"
-  export HTTPS_PROXY="$PROXY"
-  export http_proxy="$PROXY"
-  export https_proxy="$PROXY"
+  case "$PROXY" in
+    socks5*|socks:*)
+      export SOCKS5_PROXY="$PROXY"
+      export SOCKS_PROXY="$PROXY"
+      echo "[代理] 已启用 SOCKS5 代理：$PROXY"
+      ;;
+    http*|https:*)
+      export HTTP_PROXY="$PROXY"
+      export HTTPS_PROXY="$PROXY"
+      export http_proxy="$PROXY"
+      export https_proxy="$PROXY"
+      echo "[代理] 已启用 HTTP 代理：$PROXY"
+      ;;
+    *)
+      echo "[警告] 未知代理协议：$PROXY（应为 http:// 或 socks5://）"
+      ;;
+  esac
   export NO_PROXY="$NO_PROXY"
   export no_proxy="$NO_PROXY"
-  # Node.js 22.13+：让全局 fetch 读取代理环境变量
-  export NODE_USE_ENV_PROXY=1
-  echo "[代理] 已启用代理：$PROXY"
   echo "[代理] 内网不走代理：$NO_PROXY"
 fi
 
