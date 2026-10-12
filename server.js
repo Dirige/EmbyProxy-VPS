@@ -482,6 +482,10 @@ async function proxyOnce(targetUrlStr, req, mode, realIp, originHost) {
   const lib = useTls ? https : http;
   return new Promise((resolve, reject) => {
     const upReq = lib.request(reqOpts, (upRes) => {
+      // 补齐 fetch Response 风格的 body.cancel()（回退逻辑需要丢弃当前响应）
+      if (typeof upRes.cancel !== 'function') {
+        upRes.cancel = async () => { upRes.resume(); upRes.destroy(); };
+      }
       // 包装成 fetch Response 风格的对象
       resolve({
         status: upRes.statusCode,
