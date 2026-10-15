@@ -444,6 +444,13 @@ async function proxyOnce(targetUrlStr, req, mode, realIp, originHost) {
   headers['X-Forwarded-Proto'] = targetUrl.protocol.replace(':', '');
   headers['X-Forwarded-Host'] = req.headers.host || '';
 
+  // UA 兜底：客户端未带 UA 或 UA 过于简单（易被 Cloudflare/WAF 识别拦截）时，替换为标准 Chrome UA
+  const ua = String(headers['User-Agent'] || headers['user-agent'] || '');
+  if (!ua || /^(node|python|curl|wget|okhttp|DLNA)/i.test(ua) || /EmbyProxyPing/i.test(ua)) {
+    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    delete headers['user-agent'];
+  }
+
   if (mode === 'strict' || mode === 'dual') {
     headers['Origin'] = targetUrl.origin;
     headers['Referer'] = targetUrl.origin + '/';
@@ -975,7 +982,8 @@ async function handleApi(req, res, url) {
       const targetUrl = new URL(target);
       const useTls = targetUrl.protocol === 'https:';
       const port = parseInt(targetUrl.port || (useTls ? 443 : 80));
-      const pingHeaders = { 'User-Agent': 'Mozilla/5.0 EmbyProxyPing' };
+      // 标准 Chrome UA，避免非主流 UA 触发 Cloudflare 等防护拦截
+      const pingHeaders = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' };
       const reqOpts = {
         method: 'HEAD',
         host: targetUrl.hostname,
