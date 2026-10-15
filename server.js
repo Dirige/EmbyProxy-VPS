@@ -3,8 +3,13 @@
  * Emby 反代管理面板 (VPS 版)
  * 零依赖 Node.js 服务：反代引擎 + 管理面板 API + JSON 文件存储
  * 默认端口 3333，不占用 80/443
+ *
+ * 版本: v1.1.0-proxy  (含 HTTP/SOCKS5 代理支持)
+ * 验证方法: grep VERSION server.js 或启动日志/面板页脚查看
  */
 'use strict';
+
+const VERSION = 'v1.1.0-proxy';
 
 const http = require('http');
 const https = require('https');
@@ -1120,6 +1125,7 @@ server.on('upgrade', (req, socket, head) => {
 // 不指定 host：监听系统全部地址（IPv6 双栈，IPv4 自动映射），纯 IPv4 / 纯 IPv6 / 双栈机器均可访问
 server.listen(PORT, () => {
   console.log(`Emby 反代管理面板已启动: http://0.0.0.0:${PORT} （IPv4 + IPv6）`);
+  console.log(`版本: ${VERSION}`);
   console.log(`管理员密钥: ${config.adminToken}`);
   console.log(`节点数: ${routes.length}`);
 });
